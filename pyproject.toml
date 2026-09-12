@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "endstone_arc_attribute_core"
+version = "0.1.0"
+dependencies = []
+authors = [
+    { name = "DEVILENMO", email = "DEVILENMO@gmail.com" },
+]
+description = "ARC Attribute Core - 玩家属性与Buff管理器：多插件共享的移速/属性调整因子与buff优先级API"
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["endstone", "plugin", "attribute", "buff", "arc"]
+
+[project.urls]
+Homepage = "https://github.com/ARC-Minecraft"
+
+[project.entry-points."endstone"]
+arc_attribute_core = "endstone_arc_attribute_core:ARCAttributeCorePlugin"
