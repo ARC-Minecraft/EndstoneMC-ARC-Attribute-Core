@@ -52,7 +52,7 @@ class ARCAttributeCorePlugin(Plugin):
     commands = {
         "arcattr": {
             "description": "查看玩家属性因子与 buff（OP 可查他人、reload）",
-            "usages": ["/arcattr", "/arcattr <玩家>", "/arcattr reload"],
+            "usages": ["/arcattr", "/arcattr <player>", "/arcattr reload"],
             "permissions": ["arc_attribute_core.command.common"],
         },
     }
