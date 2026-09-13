@@ -46,6 +46,7 @@ class FeatureMenu:
     def register_into(self, core) -> bool:
         """向弧光核心注册主菜单按钮；仅 OP 可见（走核心 _put 的 visible 回调）。"""
         visible = lambda p: bool(getattr(p, "is_op", False))  # noqa: E731
+        icon = "textures/arc_core/attribute.png"
         put = getattr(core, "_put_main_menu_button", None)
         if callable(put):
             try:
@@ -55,6 +56,7 @@ class FeatureMenu:
                     self._guarded_open,
                     priority=self.MENU_BUTTON_PRIORITY,
                     visible=visible,
+                    icon=icon,
                 ))
             except Exception:
                 pass
@@ -66,6 +68,7 @@ class FeatureMenu:
                 self.MENU_BUTTON_TEXT,
                 self._guarded_open,
                 priority=self.MENU_BUTTON_PRIORITY,
+                icon=icon,
             ))
         return False
 
