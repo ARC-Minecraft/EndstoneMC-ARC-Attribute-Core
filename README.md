@@ -1,5 +1,5 @@
 # ARC Attribute Core - 玩家属性与 Buff 管理器
-[![Version](https://img.shields.io/badge/version-v0.1.0-blue)]()
+[![Version](https://img.shields.io/badge/version-v0.3.2-blue)]()
 
 一个为 Endstone 服务器打造的**多插件共享玩家属性管理器**：任何插件都可以发一个「属性调整请求」或「buff 请求」，由本插件统一叠加、优先级维护和到期回收，避免多个插件各自直写玩家属性互相覆盖。
 
@@ -166,6 +166,23 @@ arc.api_add_factor(player, "walk_speed", source="ars:leg",    amount=-0.25)  # �
 | `/arcattr <玩家>` | OP | 查看指定玩家 |
 | `/arcattr reload` | OP | 重载配置（保留因子状态） |
 
+## 🛠️ OP 属性管理器（主菜单）
+
+已接入弧光核心主菜单：按钮「**属性管理器**」**仅 OP 可见**（核心晚加载时由 PluginEnableEvent 自动补注册，禁用时注销）。
+
+- **属性列表**：direct + attribute 全部 17 个可管理属性，按钮上直接显示当前因子数与引擎实时值
+- **属性面板**：对比「引擎实时值」与「因子合成值」，列出因子明细，并**如实标注落地方式**（直写 / AttributeModifier / 替代通道 / 仅登记），可一眼发现"因子挂了但引擎没生效"的落地问题
+- **调整属性**：自定义来源（默认 `menu:manual`，同源覆盖）、操作类型（multiply/add）、**自定义幅度**、可选时长（秒，留空=永久）；提交后自动刷新面板并发消息确认
+- **移除/清空**：按来源移除单个因子，或确认后清空该属性全部因子（均自动重算落地）
+
+### 落地方式说明（随 endstone 版本自动选择）
+
+- `walk_speed` / `fly_speed`：独占直写 `player.walk_speed` / `player.fly_speed`
+- `health`：引擎暴露 `get_attribute` 时走 AttributeModifier；否则走**替代直写通道** `player.max_health`（base=20，如 add +5 → 25）
+- 其余 attribute 键：需要引擎 `get_attribute` + `AttributeInstance.add_modifier`。**当前 endstone 0.11.x 未向 Python 暴露该方法**，这些属性因子仅登记、暂不写入玩家（面板与消息会明确提示）；待引擎开放后自动切回 modifier 路线
+
+> 因子为内存态：通过菜单做的调整在玩家退出服务器后自动清空，适合临时调试与测试。
+
 ## 📦 安装
 
 ```bash
@@ -182,9 +199,11 @@ cp dist/*.whl /path/to/server/plugins/
 src/endstone_arc_attribute_core/
 ├── __init__.py              # 插件入口
 ├── arc_attribute_core.py    # 主插件：API / 定时器 / 事件 / 命令 / 属性落地
+├── attribute_keys.py        # 可管理属性键定义（direct / attribute）
 ├── factor_registry.py       # 属性因子表（增删/连乘/到期，纯逻辑）
 ├── buff_registry.py         # buff 优先级队列（等级/时长/回退，纯逻辑）
-└── effect_compat.py         # 药水效果 API 兼容层（0.10/0.11）
+├── effect_compat.py         # 药水效果 API 兼容层（0.10/0.11）
+└── feature_menu.py          # OP 功能菜单（主菜单按钮 / 属性调整面板）
 
 scripts/
 ├── _endstone_stub.py        # 离线测试 endstone stub

@@ -1,37 +1,14 @@
 import time
 
 from endstone.command import Command, CommandSender
-from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent
+from endstone.event import event_handler, PlayerJoinEvent, PlayerQuitEvent, PlayerRespawnEvent, PluginEnableEvent
 from endstone.plugin import Plugin
 
+from .attribute_keys import ATTRIBUTE_KEYS, DIRECT_PROPS, FALLBACK_DIRECT_PROPS, FALLBACK_INT_PROPS
 from .buff_registry import BuffChannel
 from .effect_compat import apply_mob_effect, remove_mob_effect, resolve_effect_type
 from .factor_registry import FactorRegistry, OP_ADD, OP_MULTIPLY
-
-# 独占直写属性：引擎只有一个值，所有插件统一经本 API 管理
-DIRECT_PROPS = {
-    "walk_speed": 0.10,
-    "fly_speed": 0.05,
-}
-
-# Attribute 体系属性：因子映射为 AttributeModifier，多插件原生 modifier 仍可共存
-ATTRIBUTE_KEYS = {
-    "health": "HEALTH",
-    "absorption": "ABSORPTION",
-    "attack_damage": "ATTACK_DAMAGE",
-    "knockback_resistance": "KNOCKBACK_RESISTANCE",
-    "luck": "LUCK",
-    "movement_speed": "MOVEMENT_SPEED",
-    "underwater_movement_speed": "UNDERWATER_MOVEMENT_SPEED",
-    "lava_movement_speed": "LAVA_MOVEMENT_SPEED",
-    "jump_strength": "JUMP_STRENGTH",
-    "follow_range": "FOLLOW_RANGE",
-    "player_hunger": "PLAYER_HUNGER",
-    "player_saturation": "PLAYER_SATURATION",
-    "player_exhaustion": "PLAYER_EXHAUSTION",
-    "player_experience": "PLAYER_EXPERIENCE",
-    "player_level": "PLAYER_LEVEL",
-}
+from .feature_menu import FeatureMenu
 
 DIRECT_MIN = 0.01
 DIRECT_MAX = 1.0
@@ -75,6 +52,9 @@ class ARCAttributeCorePlugin(Plugin):
         # (xuid, effect_key) -> BuffChannel
         self._buffs: dict[tuple[str, str], BuffChannel] = {}
         self._task = None
+        # OP 功能菜单（注册进弧光核心主菜单）
+        self._menu = FeatureMenu(self)
+        self._menu_registered = False
         # 已告警过不可用的属性键（避免刷屏）
         self._unsupported_keys: set[str] = set()
 
@@ -87,6 +67,7 @@ class ARCAttributeCorePlugin(Plugin):
         self.logger.info("[ARCAttributeCore] on_enable is called!")
         self.register_events(self)
         self._start_timer()
+        self._register_feature_menu()
 
     def on_disable(self) -> None:
         self.logger.info("[ARCAttributeCore] on_disable is called!")
@@ -96,6 +77,29 @@ class ARCAttributeCorePlugin(Plugin):
             except Exception:
                 pass
             self._task = None
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+            if core is not None and self._menu.unregister_from(core):
+                self._menu_registered = False
+        except Exception:
+            pass
+
+    def _register_feature_menu(self) -> None:
+        """向弧光核心注册主菜单「功能菜单」按钮；核心晚加载时由 PluginEnableEvent 兜底。"""
+        if self._menu_registered:
+            return
+        try:
+            core = self.server.plugin_manager.get_plugin("arc_core")
+        except Exception:
+            return
+        if core is None:
+            return
+        try:
+            if self._menu.register_into(core):
+                self._menu_registered = True
+                self.logger.info("[ARCAttributeCore] 已注册弧光核心主菜单「属性管理器」按钮（仅 OP 可见）")
+        except Exception as e:
+            self.logger.warning(f"[ARCAttributeCore] 注册功能菜单按钮失败: {e}")
 
     def _start_timer(self) -> None:
         """统一 20-tick（1 秒）定时器：清理过期因子与 buff 并重算落地。"""
@@ -129,8 +133,7 @@ class ARCAttributeCorePlugin(Plugin):
             if key in DIRECT_PROPS:
                 self._apply_direct(player, key)
             else:
-                for source in expired:
-                    self._remove_modifier(player, key, source)
+                self._land_attribute_key(player, key, expired, remove=True)
         for (xuid, effect_key), channel in list(self._buffs.items()):
             if not channel.expire(now):
                 continue
@@ -159,13 +162,10 @@ class ARCAttributeCorePlugin(Plugin):
         xuid = self._get_xuid(player)
         registry = self._factors.get((xuid, key))
         if registry is None:
-            registry = FactorRegistry(base=DIRECT_PROPS.get(key, 0.0))
+            registry = FactorRegistry(base=self._key_base(key))
             self._factors[(xuid, key)] = registry
         registry.add(source, amount, duration, operation)
-        if key in DIRECT_PROPS:
-            self._apply_direct(player, key)
-        else:
-            self._sync_modifier(player, key, source)
+        self._land_factor(player, key, source=source)
         return True
 
     def api_remove_factor(self, player, key: str, source: str) -> bool:
@@ -178,10 +178,7 @@ class ARCAttributeCorePlugin(Plugin):
             return False
         if registry.is_empty():
             self._factors.pop((xuid, key), None)
-        if key in DIRECT_PROPS:
-            self._apply_direct(player, key)
-        else:
-            self._remove_modifier(player, key, source)
+        self._land_factor(player, key, source=source, remove=True)
         return True
 
     def api_clear_factors(self, player, key: str | None = None) -> int:
@@ -204,21 +201,49 @@ class ARCAttributeCorePlugin(Plugin):
             if src_key in DIRECT_PROPS:
                 self._apply_direct(player, src_key)
             else:
-                for source in registry.sources():
-                    self._remove_modifier(player, src_key, source)
+                self._land_attribute_key(player, src_key, registry.sources(), remove=True)
         return removed
 
+    def _key_base(self, key: str) -> float:
+        """属性键的注册表 base：direct / 替代直写键用引擎默认值，其余为 0。"""
+        base = DIRECT_PROPS.get(key)
+        if base is not None:
+            return base
+        return FALLBACK_DIRECT_PROPS.get(key, ("", 0.0))[1]
+
+    def _land_factor(self, player, key: str, source: str | None = None, remove: bool = False) -> None:
+        """单因子落地：direct 键直写；attribute 键优先 modifier，引擎不可用时走替代直写通道。"""
+        if key in DIRECT_PROPS:
+            self._apply_direct(player, key)
+            return
+        self._land_attribute_key(player, key, [source] if source else [], remove=remove)
+
+    def _land_attribute_key(self, player, key: str, sources, remove: bool = False) -> None:
+        """attribute 键落地：引擎支持 get_attribute 时逐个同步/撤销 modifier，
+        否则若配置了替代直写通道（如 health→max_health）则整键重算直写；再无通道仅登记。"""
+        attr = self._get_attribute(player, key)
+        if attr is not None:
+            for src in sources:
+                if remove:
+                    self._remove_modifier(player, key, src)
+                else:
+                    self._sync_modifier(player, key, src)
+        elif key in FALLBACK_DIRECT_PROPS:
+            self._apply_direct(player, key)
+
     def api_get_factor_value(self, player, key: str) -> float | None:
-        """查询最终值：direct 属性返回钳制后的实际写入值；attribute 系返回因子合成值。"""
+        """查询最终值：direct / 替代直写属性返回钳制后的实际写入值；attribute 系返回因子合成值。"""
         key = self._normalize_key(key)
         if key is None:
             return None
         registry = self._factors.get((self._get_xuid(player), key))
         if registry is None:
-            return float(DIRECT_PROPS.get(key, 0.0))
+            return float(self._key_base(key))
         value = registry.compute()
         if key in DIRECT_PROPS:
             return max(DIRECT_MIN, min(DIRECT_MAX, value))
+        if key in FALLBACK_DIRECT_PROPS:
+            return max(1.0, min(1024.0, value))
         return value
 
     def api_list_factors(self, player, key: str | None = None) -> dict[str, list[str]]:
@@ -234,6 +259,14 @@ class ARCAttributeCorePlugin(Plugin):
             if lines:
                 result[k] = lines
         return result
+
+    def _factor_sources(self, player, key: str) -> list[str]:
+        """指定属性的来源列表（功能菜单移除面板用）。"""
+        key = self._normalize_key(key)
+        if key is None:
+            return []
+        registry = self._factors.get((self._get_xuid(player), key))
+        return registry.sources() if registry is not None else []
 
     # ---------- 对外 API：buff ----------
 
@@ -305,20 +338,31 @@ class ARCAttributeCorePlugin(Plugin):
     # ---------- 落地 ----------
 
     def _apply_direct(self, player, key: str) -> None:
-        """walk_speed / fly_speed：直写 base × 因子连乘（钳制 0.01~1.0）。"""
+        """direct / 替代直写键：base × 因子连乘后写回玩家属性（钳制 0.01~1.0 / health 1~1024）。"""
         try:
             registry = self._factors.get((self._get_xuid(player), key))
-            base = DIRECT_PROPS[key]
+            base = DIRECT_PROPS.get(key)
+            prop = key
+            if base is None:
+                fallback = FALLBACK_DIRECT_PROPS.get(key)
+                if fallback is None:
+                    return
+                prop, base = fallback
             value = registry.compute() if registry is not None else base
-            value = max(DIRECT_MIN, min(DIRECT_MAX, value))
+            if key in DIRECT_PROPS:
+                value = max(DIRECT_MIN, min(DIRECT_MAX, value))
+            else:
+                value = max(1.0, min(1024.0, value))
+            if prop in FALLBACK_INT_PROPS:
+                value = int(round(value))  # max_health 等 setter 仅收整数
             try:
-                current = float(getattr(player, key))
+                current = float(getattr(player, prop))
             except Exception:
                 current = None
             if current is not None and abs(current - value) < 1e-9:
                 return  # 值未变化不写入，避免无谓打断疾跑
             was_sprinting = bool(getattr(player, "is_sprinting", False))
-            setattr(player, key, value)
+            setattr(player, prop, value)
             if was_sprinting and key == "walk_speed":
                 self._restore_sprint(player)
         except Exception as e:
@@ -387,7 +431,11 @@ class ARCAttributeCorePlugin(Plugin):
         except Exception:
             try:
                 for existing in list(getattr(attr_instance, "modifiers", []) or []):
-                    if getattr(existing, "id", None) == modifier_id:
+                    # 0.11+ 的 AttributeModifier 无 .id，以 name（构造时的 modifier_id）匹配
+                    if (
+                        getattr(existing, "id", None) == modifier_id
+                        or getattr(existing, "name", None) == modifier_id
+                    ):
                         attr_instance.remove_modifier(existing)
                         break
             except Exception:
@@ -406,7 +454,14 @@ class ARCAttributeCorePlugin(Plugin):
             get_attr = getattr(player, "get_attribute", None)
             if get_attr is None:
                 self._unsupported_keys.add(key)
-                self.logger.warning(f"[ARCAttributeCore] 当前 Player 不支持 get_attribute，忽略属性 {key}")
+                if key in FALLBACK_DIRECT_PROPS:
+                    self.logger.warning(
+                        f"[ARCAttributeCore] 当前 endstone 未暴露 get_attribute，属性 {key} 走直写替代通道"
+                    )
+                else:
+                    self.logger.warning(
+                        f"[ARCAttributeCore] 当前 endstone 未暴露 get_attribute，属性 {key} 仅登记、无法落地"
+                    )
                 return None
             instance = get_attr(attr_enum)
             if instance is None:
@@ -485,22 +540,32 @@ class ARCAttributeCorePlugin(Plugin):
 
     @event_handler()
     def on_player_join(self, event: PlayerJoinEvent):
-        # direct 属性在重进后由引擎恢复默认；若有残留内存态则重算落地
+        # direct / 替代直写属性在重进后由引擎恢复默认；若有残留内存态则重算落地
         player = event.player
         xuid = self._get_xuid(player)
         for (uid, key) in self._factors:
-            if uid == xuid and key in DIRECT_PROPS:
+            if uid == xuid and (key in DIRECT_PROPS or key in FALLBACK_DIRECT_PROPS):
                 self._apply_direct(player, key)
 
     @event_handler()
     def on_player_quit(self, event: PlayerQuitEvent):
         player = event.player
         xuid = self._get_xuid(player)
-        # direct 属性恢复默认（引擎不持久，双保险）；因子内存清空
+        # direct / 替代直写属性恢复默认（引擎不持久，双保险）；因子内存清空
         for (uid, key) in list(self._factors):
-            if uid == xuid and key in DIRECT_PROPS:
+            if uid != xuid:
+                continue
+            if key in DIRECT_PROPS:
                 try:
                     setattr(player, key, DIRECT_PROPS[key])
+                except Exception:
+                    pass
+            elif key in FALLBACK_DIRECT_PROPS:
+                prop, base = FALLBACK_DIRECT_PROPS[key]
+                if prop in FALLBACK_INT_PROPS:
+                    base = int(round(base))
+                try:
+                    setattr(player, prop, base)
                 except Exception:
                     pass
         self._factors = {k: v for k, v in self._factors.items() if k[0] != xuid}
@@ -518,11 +583,19 @@ class ARCAttributeCorePlugin(Plugin):
             if key in DIRECT_PROPS:
                 self._apply_direct(player, key)
             else:
-                for source in registry.sources():
-                    self._sync_modifier(player, key, source)
+                self._land_attribute_key(player, key, registry.sources())
         for (uid, effect_key), channel in self._buffs.items():
             if uid == xuid:
                 self._apply_active_buff(player, effect_key)
+
+    @event_handler()
+    def on_plugin_enable(self, event: PluginEnableEvent):
+        """弧光核心晚于本插件加载时，补注册功能菜单按钮。"""
+        try:
+            if str(getattr(getattr(event, "plugin", None), "name", "")) == "arc_core":
+                self._register_feature_menu()
+        except Exception:
+            pass
 
     # ---------- 命令 ----------
 

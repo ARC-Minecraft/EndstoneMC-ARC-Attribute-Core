@@ -115,6 +115,7 @@ class FakePlayer:
         self.xuid = xuid
         self.walk_speed = 0.10
         self.fly_speed = 0.05
+        self.max_health = 20.0
         self._attrs: dict[str, AttributeInstance] = {}
         self.effects_applied = []  # (type, duration_ticks, amplifier)
         self.effects_removed = []
@@ -259,5 +260,235 @@ plugin_sp.api_add_factor(sprinter, "walk_speed", "test:boost", 0.5)  # 同 sourc
 assert plugin_sp.server.scheduler.tasks == [], "值未变化不应写 walk_speed"
 assert abs(sprinter.walk_speed - 0.15) < 1e-9
 print("   同 tick 恢复 + 延迟恢复 + 无变化跳过 ok")
+
+# ---------- OP 功能菜单 ----------
+
+import json as _json
+
+from endstone.form import ActionForm, MessageForm, ModalForm
+
+print("\n== 17) 功能菜单：主菜单按钮注册（仅 OP 可见）")
+
+
+class FakePluginManager:
+    def __init__(self, plugins):
+        self._plugins = plugins
+
+    def get_plugin(self, name):
+        return self._plugins.get(name)
+
+
+class FakeArcCore:
+    def __init__(self):
+        self.buttons = {}
+
+    def _put_main_menu_button(self, button_id, text, on_click, priority=6, visible=None):
+        self.buttons[button_id] = {
+            "text": text, "on_click": on_click, "priority": priority, "visible": visible,
+        }
+        return True
+
+    def api_unregister_main_menu_button(self, button_id):
+        return self.buttons.pop(button_id, None) is not None
+
+
+class MenuPlayer(FakePlayer):
+    def __init__(self, name, xuid, is_op=False):
+        super().__init__(name, xuid)
+        self.is_op = is_op
+        self.forms = []
+        self.messages = []
+
+    def send_form(self, form):
+        self.forms.append(form)
+
+    def send_message(self, m):
+        self.messages.append(str(m))
+
+
+arc_core = FakeArcCore()
+alice = MenuPlayer("Alice", "x17", is_op=True)
+bob = MenuPlayer("Bob", "x17b", is_op=False)
+plugin_menu = ARCAttributeCorePlugin()
+plugin_menu.logger = FakeLogger()
+plugin_menu.server = FakeServer([alice, bob])
+plugin_menu.server.plugin_manager = FakePluginManager({"arc_core": arc_core})
+
+plugin_menu._register_feature_menu()
+entry = arc_core.buttons["arc_attribute_core:feature_menu"]
+assert entry["text"] == "属性管理器"
+assert entry["visible"](alice) is True and entry["visible"](bob) is False
+print("   已注册进弧光核心主菜单，visible 仅 OP 为真 ok")
+
+arc_core2 = FakeArcCore()
+plugin_menu._menu_registered = False
+plugin_menu.server.plugin_manager = FakePluginManager({"arc_core": arc_core2})
+
+
+class _NamedPlugin:
+    name = "arc_core"
+
+
+class _EnableEvent:
+    def __init__(self, plugin):
+        self.plugin = plugin
+
+
+plugin_menu.on_plugin_enable(_EnableEvent(_NamedPlugin()))
+assert "arc_attribute_core:feature_menu" in arc_core2.buttons, "弧光核心晚加载应兜底注册"
+print("   PluginEnableEvent 兜底注册 ok")
+
+print("\n== 18) 功能菜单：面板流转与自定义幅度")
+entry2 = arc_core2.buttons["arc_attribute_core:feature_menu"]
+alice.forms.clear()
+entry2["on_click"](alice)
+menu_form = alice.forms[-1]
+assert isinstance(menu_form, ActionForm) and len(menu_form.buttons) == 17, len(menu_form.buttons)
+
+bob.forms.clear()
+bob.messages.clear()
+entry2["on_click"](bob)
+assert bob.forms == [] and any("OP" in m for m in bob.messages), "非 OP 应被拦截"
+print("   功能菜单 17 个属性按钮；非 OP 拦截 ok")
+
+walk_btn = next(on for text, on in menu_form.buttons if text.startswith("行走速度"))
+alice.forms.clear()
+walk_btn(alice)
+detail = alice.forms[-1]
+assert isinstance(detail, ActionForm) and "引擎实时值：0.1000" in detail.content
+add_btn = next(on for text, on in detail.buttons if text.startswith("添加"))
+alice.forms.clear()
+add_btn(alice)
+add_form = alice.forms[-1]
+assert isinstance(add_form, ModalForm)
+
+alice.messages.clear()
+# 真实 endstone 布局：Label 占首位（None），共 5 个元素
+add_form.on_submit(alice, _json.dumps([None, "menu:test", 0, "-0.5", "10"]))
+assert abs(alice.walk_speed - 0.05) < 1e-9, alice.walk_speed
+assert alice.messages and "已应用" in alice.messages[-1]
+detail2 = alice.forms[-1]
+assert isinstance(detail2, ActionForm), "提交后应刷新详情面板"
+
+alice.forms.clear()
+next(on for text, on in detail2.buttons if text.startswith("添加"))(alice)
+add_form2 = alice.forms[-1]
+add_form2.on_submit(alice, _json.dumps([None, "menu:test", 0, "-0.75", ""]))
+assert abs(alice.walk_speed - 0.025) < 1e-9, alice.walk_speed
+lines = plugin_menu.api_list_factors(alice, "walk_speed")["walk_speed"]
+assert len(lines) == 1 and "menu:test" in lines[0], lines
+
+kept = alice.walk_speed
+alice.forms.clear()
+next(on for text, on in detail2.buttons if text.startswith("添加"))(alice)
+add_form3 = alice.forms[-1]
+add_form3.on_submit(alice, _json.dumps([None, "menu:test", 0, "abc", ""]))
+assert abs(alice.walk_speed - kept) < 1e-9 and any("幅度无效" in m for m in alice.messages)
+print("   multiply -0.5 → 0.05；同源覆盖 -0.75 → 0.025；非法幅度拒绝 ok")
+
+plugin_menu._menu.open_add_factor(alice, "attack_damage")
+add_flat = alice.forms[-1]
+# 兼容布局：无 Label 占位，共 4 个元素
+add_flat.on_submit(alice, _json.dumps(["menu:flat", "1", "5", ""]))
+inst = alice._attrs["minecraft:attack_damage"]
+mod = inst.get_modifier("arcattr:attack_damage:menu:flat")
+assert mod is not None and mod.operation == AttributeModifier.ADD and mod.amount == 5
+
+plugin_menu._menu.open_add_factor(alice, "attack_damage")
+add_text = alice.forms[-1]
+add_text.on_submit(alice, _json.dumps(["menu:text", "add（基础值直接加减）", "2", ""]))
+mod2 = inst.get_modifier("arcattr:attack_damage:menu:text")
+assert mod2 is not None and mod2.operation == AttributeModifier.ADD and mod2.amount == 2
+print("   add 操作：索引与选项文本两种提交均解析为 ADD ok")
+
+plugin_menu._menu.open_remove_source(alice, "walk_speed")
+rm_form = alice.forms[-1]
+rm_btn = next(on for text, on in rm_form.buttons if text.endswith("menu:test"))
+rm_btn(alice)
+assert "menu:test" not in plugin_menu.api_list_factors(alice, "walk_speed")
+assert abs(alice.walk_speed - 0.10) < 1e-9
+print("   按来源移除并重算落地 ok")
+
+plugin_menu.api_add_factor(alice, "walk_speed", "menu:bulk", -0.2)
+plugin_menu._menu._confirm_clear(alice, "walk_speed")
+confirm = alice.forms[-1]
+assert isinstance(confirm, MessageForm)
+confirm.on_submit(alice, True)
+assert "walk_speed" not in plugin_menu.api_list_factors(alice)
+assert abs(alice.walk_speed - 0.10) < 1e-9
+print("   MessageForm 确认后清空全部因子 ok")
+
+plugin_menu.on_disable()
+assert "arc_attribute_core:feature_menu" not in arc_core2.buttons
+print("   on_disable 注销主菜单按钮 ok")
+
+print("\n== 19) health 替代直写通道（引擎无 get_attribute）")
+
+
+class NoAttrPlayer(MenuPlayer):
+    """模拟真实引擎：无 get_attribute，且 max_health setter 仅收整数（pybind SupportsInt）。"""
+
+    def __init__(self, name, xuid, is_op=False):
+        super().__init__(name, xuid, is_op)
+        self._strict_max_health = True
+
+    def __setattr__(self, name, value):
+        if (
+            name == "max_health"
+            and getattr(self, "_strict_max_health", False)
+            and not isinstance(value, int)
+        ):
+            raise TypeError(
+                "incompatible function arguments: (arg0: Mob, arg1: typing.SupportsInt)"
+            )
+        object.__setattr__(self, name, value)
+
+    def get_attribute(self, attr_enum):
+        return None
+
+
+nathan = NoAttrPlayer("Nathan", "x19", is_op=True)
+plugin_fb = ARCAttributeCorePlugin()
+plugin_fb.logger = FakeLogger()
+plugin_fb.server = FakeServer([nathan])
+
+assert nathan.max_health == 20.0
+plugin_fb.api_add_factor(nathan, "health", "menu:manual", 5, operation="add")
+assert abs(nathan.max_health - 25.0) < 1e-9, nathan.max_health
+assert abs(plugin_fb.api_get_factor_value(nathan, "health") - 25.0) < 1e-9
+plugin_fb.api_add_factor(nathan, "health", "menu:manual", -0.5)  # 覆盖为 multiply ×0.5
+assert abs(nathan.max_health - 10.0) < 1e-9, nathan.max_health
+plugin_fb.api_remove_factor(nathan, "health", "menu:manual")
+assert abs(nathan.max_health - 20.0) < 1e-9
+print("   add +5 → 25；覆盖 multiply ×0.5 → 10；移除恢复 20 ok")
+
+plugin_fb.api_add_factor(nathan, "attack_damage", "menu:x", 3, operation="add")
+assert "attack_damage" in plugin_fb.api_list_factors(nathan), "无通道属性应仍登记"
+print("   无落地通道属性：仅登记、不报错 ok")
+
+plugin_fb.api_add_factor(nathan, "health", "menu:manual", 5, operation="add")
+plugin_fb.on_player_quit(QuitEvent(nathan))
+assert abs(nathan.max_health - 20.0) < 1e-9, "退出应恢复默认 20"
+plugin_fb.api_add_factor(nathan, "health", "menu:manual", 5, operation="add")
+nathan.max_health = 20  # 模拟引擎重生重置
+plugin_fb.on_player_respawn(RespawnEvent(nathan))
+assert abs(nathan.max_health - 25.0) < 1e-9, "重生应重挂因子"
+print("   退出恢复默认、重生重挂 ok")
+
+plugin_fb.api_add_factor(nathan, "health", "buff:temp", 1.0, duration=5, operation="add")
+assert abs(nathan.max_health - 26.0) < 1e-9, nathan.max_health
+plugin_fb._tick_once(time.time() + 6)
+assert abs(nathan.max_health - 25.0) < 1e-9, "定时因子到期应回落"
+plugin_fb.api_remove_factor(nathan, "health", "menu:manual")
+assert abs(nathan.max_health - 20.0) < 1e-9
+print("   临时因子到期回落、移除恢复 ok")
+
+plugin_fb._menu.open_attribute(nathan, "health")
+panel = nathan.forms[-1]
+assert "player.max_health" in panel.content and "替代直写通道" in panel.content
+plugin_fb._menu.open_attribute(nathan, "attack_damage")
+panel2 = nathan.forms[-1]
+assert "仅登记" in panel2.content
+print("   面板如实标注落地方式 ok")
 
 print("\nALL ATTRIBUTE CORE SMOKE TESTS PASSED")

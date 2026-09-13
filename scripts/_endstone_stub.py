@@ -41,12 +41,74 @@ evt_mod.event_handler = event_handler
 for cls_name in (
     "PlayerJoinEvent", "PlayerQuitEvent", "PlayerRespawnEvent",
     "PlayerItemConsumeEvent", "PlayerMoveEvent", "ActorDamageEvent",
-    "PlayerDeathEvent", "PlayerGameModeChangeEvent",
+    "PlayerDeathEvent", "PlayerGameModeChangeEvent", "PluginEnableEvent",
 ):
     setattr(evt_mod, cls_name, type(cls_name, (), {}))
 
 plugin_mod = _mod("endstone.plugin")
 plugin_mod.Plugin = type("Plugin", (), {})
+
+# ---- endstone.form ----
+form_mod = _mod("endstone.form")
+
+
+class Label:
+    def __init__(self, text=""):
+        self.text = text
+
+
+class TextInput:
+    def __init__(self, label="", placeholder=None, default_value=None):
+        self.label = label
+        self.placeholder = placeholder
+        self.default_value = default_value
+
+
+class Dropdown:
+    def __init__(self, label="", options=None, default_index=0):
+        self.label = label
+        self.options = list(options or [])
+        self.default_index = default_index
+
+
+class _BaseForm:
+    def __init__(self, title=""):
+        self.title = title
+
+
+class ActionForm(_BaseForm):
+    def __init__(self, title="", content=None):
+        super().__init__(title)
+        self.content = content
+        self.buttons = []  # (text, on_click)
+
+    def add_button(self, text, on_click=None, **kwargs):
+        self.buttons.append((text, on_click))
+
+
+class ModalForm(_BaseForm):
+    def __init__(self, title="", controls=None, on_submit=None, on_close=None):
+        super().__init__(title)
+        self.controls = list(controls or [])
+        self.on_submit = on_submit
+        self.on_close = on_close
+
+
+class MessageForm(_BaseForm):
+    def __init__(self, title="", text=""):
+        super().__init__(title)
+        self.text = text
+        self.button1 = "确定"
+        self.button2 = "取消"
+        self.on_submit = None
+
+
+form_mod.Label = Label
+form_mod.TextInput = TextInput
+form_mod.Dropdown = Dropdown
+form_mod.ActionForm = ActionForm
+form_mod.ModalForm = ModalForm
+form_mod.MessageForm = MessageForm
 
 # ---- endstone.attribute ----
 attr_mod = _mod("endstone.attribute")
