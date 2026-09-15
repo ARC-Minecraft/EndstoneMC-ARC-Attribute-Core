@@ -15,7 +15,7 @@ license = { file = "LICENSE" }
 keywords = ["endstone", "plugin", "attribute", "buff", "arc"]
 
 [project.urls]
-Homepage = "https://github.com/ARC-Minecraft"
+Homepage = "https://github.com/ARC-Game-Club"
 
 [project.entry-points."endstone"]
 arc_attribute_core = "endstone_arc_attribute_core:ARCAttributeCorePlugin"
